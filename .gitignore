@@ -26,6 +26,9 @@ htmlcov/
 .idea/
 .vscode/
 
+# Local agent instructions
+AGENTS.md
+
 # Runtime outputs and local data
 logs/
 data/**
