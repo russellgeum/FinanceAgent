@@ -1,4 +1,4 @@
-"""PBT 애플리케이션 소스 패키지."""
+"""프로젝트 전역 Python 바이트코드 생성을 비활성화한다."""
 
 from __future__ import annotations
 

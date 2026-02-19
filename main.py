@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+sys.dont_write_bytecode = True
 
 from src.agents.ingestion_pipeline import NaverRAGIngestionPipeline
 from src.utils.config import AppConfig, load_app_config

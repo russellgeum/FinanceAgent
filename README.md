@@ -58,6 +58,8 @@ cp .env.example .env
 - `PBT_NAVER_MAX_REPORTS`: 1회 실행 시 최대 처리 리포트 수
 - `PBT_NAVER_USE_PLAYWRIGHT`: 정적 파싱 실패 시 Playwright fallback 사용 여부
 
+바이트코드 생성 파일(`__pycache__`, `*.pyc`)은 프로젝트 기본 설정으로 생성되지 않도록 구성되어 있습니다.
+
 4) Playwright 사용 시(선택)
 
 ```bash
