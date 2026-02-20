@@ -7,7 +7,9 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
+from src.agents.gemini_summarizer import GeminiReportSummarizer
 from src.agents.summarizer import ClaudeReportSummarizer
 from src.collectors.naver_report_collector import NaverReportCollector, ReportSource
 from src.processors.chunker import chunk_text
@@ -62,12 +64,16 @@ class IngestionSummary:
 
 class NaverRAGIngestionPipeline:
     """
-    네이버 리포트를 수집해 벡터 DB 적재와 Claude 요약을 수행한다.
+    네이버 리포트를 수집해 벡터 DB 적재와 통합 요약을 수행한다.
 
     Args:
         project_root (Path): 프로젝트 루트 경로.
         voyage_api_key (str): Voyage API 키.
+        voyage_model (str): Voyage 임베딩 모델명.
         anthropic_api_key (str): Anthropic API 키.
+        claude_model (str): Claude 모델명.
+        gemini_api_key (str): Gemini API 키.
+        gemini_model (str): Gemini 모델명.
         pages_per_category (int): 카테고리당 조회 페이지 수.
         max_reports (int): 최대 처리 리포트 수.
         use_playwright (bool): 크롤링 시 Playwright fallback 사용 여부.
@@ -81,7 +87,11 @@ class NaverRAGIngestionPipeline:
         self,
         project_root: Path,
         voyage_api_key: str,
+        voyage_model: str,
         anthropic_api_key: str,
+        claude_model: str,
+        gemini_api_key: str,
+        gemini_model: str,
         pages_per_category: int,
         max_reports: int,
         use_playwright: bool,
@@ -89,14 +99,28 @@ class NaverRAGIngestionPipeline:
     ) -> None:
         self._project_root: Path = project_root
         self._voyage_api_key: str = voyage_api_key
+        self._voyage_model: str = voyage_model
         self._anthropic_api_key: str = anthropic_api_key
+        self._claude_model: str = claude_model
+        self._gemini_api_key: str = gemini_api_key
+        self._gemini_model: str = gemini_model
         self._pages_per_category: int = pages_per_category
         self._max_reports: int = max_reports
         self._logger: logging.Logger = logger
 
         self._collector = NaverReportCollector(use_playwright=use_playwright)
-        self._embedder = VoyageEmbedder(api_key=voyage_api_key)
-        self._summarizer = ClaudeReportSummarizer(api_key=anthropic_api_key)
+        self._embedder = VoyageEmbedder(
+            api_key=voyage_api_key,
+            model=voyage_model,
+        )
+        self._claude_summarizer = ClaudeReportSummarizer(
+            api_key=anthropic_api_key,
+            model=claude_model,
+        )
+        self._gemini_summarizer = GeminiReportSummarizer(
+            api_key=gemini_api_key,
+            model=gemini_model,
+        )
         self._vector_store = ChromaReportStore(
             persist_directory=self._project_root / "data" / "chroma",
         )
@@ -106,7 +130,7 @@ class NaverRAGIngestionPipeline:
 
     def run(self) -> IngestionSummary:
         """
-        수집부터 Chroma 적재 및 Claude 요약까지 전체 파이프라인을 실행한다.
+        수집부터 Chroma 적재 및 통합 요약까지 전체 파이프라인을 실행한다.
 
         Args:
             None
@@ -118,9 +142,9 @@ class NaverRAGIngestionPipeline:
             raise ValueError(
                 "VOYAGE_API_KEY가 비어 있어 임베딩/벡터 적재를 진행할 수 없습니다.",
             )
-        if not self._anthropic_api_key.strip():
+        if not self._anthropic_api_key.strip() and not self._gemini_api_key.strip():
             raise ValueError(
-                "ANTHROPIC_API_KEY가 비어 있어 Claude 요약을 진행할 수 없습니다.",
+                "ANTHROPIC_API_KEY 또는 GEMINI_API_KEY 중 하나는 필요합니다.",
             )
 
         started_at: str = now_stamp()
@@ -140,6 +164,18 @@ class NaverRAGIngestionPipeline:
         sources: list[ReportSource] = self._collector.fetch_report_sources(
             pages_per_category=self._pages_per_category,
         )
+        fetch_errors: list[str] = self._collector.get_last_fetch_errors()
+        if not sources and fetch_errors:
+            sampled_errors: str = " | ".join(fetch_errors[:3])
+            raise RuntimeError(
+                "리포트 수집 결과가 0건이며 목록 조회 에러가 존재합니다. "
+                f"details={sampled_errors}",
+            )
+        if not sources:
+            self._logger.warning(
+                "리포트 수집 결과가 0건입니다. "
+                "목록 구조 변경 또는 일시적 게시물 부재 여부를 확인하세요.",
+            )
         limited_sources: list[ReportSource] = sources[: self._max_reports]
 
         processed_count: int = 0
@@ -199,7 +235,42 @@ class NaverRAGIngestionPipeline:
                     embeddings=embeddings,
                     metadatas=chunk_metadatas,
                 )
-                summary_markdown: str = self._summarizer.summarize(content)
+                claude_summary, claude_error = self._try_provider_summary(
+                    provider_name="Claude",
+                    summarize_func=self._claude_summarizer.summarize,
+                    report_text=content,
+                )
+                gemini_summary, gemini_error = self._try_provider_summary(
+                    provider_name="Gemini",
+                    summarize_func=self._gemini_summarizer.summarize,
+                    report_text=content,
+                )
+
+                if claude_summary is None and gemini_summary is None:
+                    raise RuntimeError(
+                        "Claude/Gemini 요약이 모두 실패했습니다. "
+                        f"claude={claude_error}, gemini={gemini_error}",
+                    )
+
+                if claude_summary is None and gemini_summary is not None:
+                    self._logger.warning(
+                        "Claude 요약 실패, Gemini 폴백 사용: id=%s, reason=%s",
+                        document_id,
+                        claude_error,
+                    )
+                if gemini_summary is None and claude_summary is not None:
+                    self._logger.warning(
+                        "Gemini 요약 실패, Claude 폴백 사용: id=%s, reason=%s",
+                        document_id,
+                        gemini_error,
+                    )
+
+                summary_markdown: str = self._merge_summaries(
+                    claude_summary=claude_summary,
+                    gemini_summary=gemini_summary,
+                    claude_error=claude_error,
+                    gemini_error=gemini_error,
+                )
                 self._write_report_summary(
                     document_id=document_id,
                     summary_text=summary_markdown,
@@ -212,7 +283,7 @@ class NaverRAGIngestionPipeline:
                 )
                 processed_count += 1
                 self._logger.info(
-                    "적재/요약 성공: id=%s, title=%s, chunks=%s",
+                    "적재/통합요약 성공: id=%s, title=%s, chunks=%s",
                     document_id,
                     source.title,
                     len(chunks),
@@ -240,6 +311,96 @@ class NaverRAGIngestionPipeline:
 
         return summary
 
+    def _try_provider_summary(
+        self,
+        provider_name: str,
+        summarize_func: Callable[[str], str],
+        report_text: str,
+    ) -> tuple[str | None, str | None]:
+        """
+        단일 요약 제공자 호출을 시도하고 성공/실패 결과를 반환한다.
+
+        Args:
+            provider_name (str): 제공자 이름(Claude/Gemini).
+            summarize_func (Callable[[str], str]): 요약 함수.
+            report_text (str): 요약 대상 원문 텍스트.
+
+        Returns:
+            tuple[str | None, str | None]:
+                성공 시 (요약문, None), 실패 시 (None, 에러 요약문).
+        """
+        try:
+            summary: str = summarize_func(report_text)
+            return summary, None
+        except Exception as exc:
+            error_message: str = self._format_error_message(exc)
+            self._logger.warning(
+                "%s 요약 실패: reason=%s",
+                provider_name,
+                error_message,
+            )
+            return None, error_message
+
+    def _format_error_message(self, exc: Exception) -> str:
+        """
+        예외 메시지를 로그/요약용 한 줄 문자열로 정리한다.
+
+        Args:
+            exc (Exception): 발생 예외 객체.
+
+        Returns:
+            str: 줄바꿈 제거 및 길이 제한을 적용한 에러 문자열.
+        """
+        normalized: str = " ".join(str(exc).split())
+        if len(normalized) <= 220:
+            return normalized
+        return f"{normalized[:217]}..."
+
+    def _merge_summaries(
+        self,
+        claude_summary: str | None,
+        gemini_summary: str | None,
+        claude_error: str | None,
+        gemini_error: str | None,
+    ) -> str:
+        """
+        Claude/Gemini 요약 결과를 단일 마크다운으로 병합한다.
+
+        Args:
+            claude_summary (str | None): Claude 요약 결과.
+            gemini_summary (str | None): Gemini 요약 결과.
+            claude_error (str | None): Claude 실패 원인.
+            gemini_error (str | None): Gemini 실패 원인.
+
+        Returns:
+            str: 병합된 단일 마크다운 텍스트.
+        """
+        claude_section: str
+        gemini_section: str
+        if claude_summary is not None:
+            claude_section = claude_summary.strip()
+        else:
+            claude_section = (
+                "요약 생성 실패. "
+                f"실패 원인: {claude_error or '알 수 없는 오류'}"
+            )
+
+        if gemini_summary is not None:
+            gemini_section = gemini_summary.strip()
+        else:
+            gemini_section = (
+                "요약 생성 실패. "
+                f"실패 원인: {gemini_error or '알 수 없는 오류'}"
+            )
+
+        return (
+            "# 통합 리포트 요약\n\n"
+            "## Claude 요약\n\n"
+            f"{claude_section}\n\n"
+            "## Gemini 요약\n\n"
+            f"{gemini_section}\n"
+        )
+
     def _write_report_summary(
         self,
         document_id: str,
@@ -251,7 +412,7 @@ class NaverRAGIngestionPipeline:
 
         Args:
             document_id (str): 리포트 고유 문서 ID.
-            summary_text (str): Claude 요약 결과 텍스트.
+            summary_text (str): 통합 요약 결과 텍스트.
             directory (Path): 저장 디렉터리.
 
         Returns:
