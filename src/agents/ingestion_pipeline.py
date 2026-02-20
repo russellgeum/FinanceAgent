@@ -12,7 +12,10 @@ from src.agents.summarizer import ReportSummarizer
 from src.collectors.naver_report_collector import NaverReportCollector, ReportSource
 from src.processors.chunker import chunk_text
 from src.processors.embedder import BaseEmbedder
-from src.processors.pdf_parser import extract_text_from_pdf
+from src.processors.pdf_parser import (
+    PdfExtractionDiagnostics,
+    extract_text_from_pdf_with_diagnostics,
+)
 from src.processors.schemas import ReportMetadata
 from src.storage.sqlite_store import CrawlHistoryStore
 from src.storage.vector_store import BaseVectorStore
@@ -191,7 +194,23 @@ class NaverRAGIngestionPipeline:
                 pdf_path: Path = report_batch_dir / f"{document_id}.pdf"
                 self._collector.download_pdf(pdf_url, pdf_path)
 
-                content: str = extract_text_from_pdf(pdf_path)
+                (
+                    content,
+                    parse_diagnostics,
+                ) = extract_text_from_pdf_with_diagnostics(pdf_path)
+                self._write_parsed_text_log(
+                    document_id=document_id,
+                    parsed_text=content,
+                    diagnostics=parse_diagnostics,
+                    directory=response_batch_dir,
+                )
+                self._logger.info(
+                    "PDF 파싱 결과: id=%s, parser=%s, chars=%s, hangul=%s",
+                    document_id,
+                    parse_diagnostics.selected_parser,
+                    parse_diagnostics.selected_text_length,
+                    parse_diagnostics.selected_hangul_count,
+                )
                 chunks: list[str] = chunk_text(content)
                 if not chunks:
                     raise RuntimeError("PDF 텍스트 청킹 결과가 비어 있습니다.")
@@ -410,6 +429,36 @@ class NaverRAGIngestionPipeline:
         summary_path: Path = directory / f"{document_id}.md"
         summary_path.write_text(summary_text, encoding="utf-8")
         return summary_path
+
+    def _write_parsed_text_log(
+        self,
+        document_id: str,
+        parsed_text: str,
+        diagnostics: PdfExtractionDiagnostics,
+        directory: Path,
+    ) -> None:
+        """
+        파싱된 원문 텍스트와 파서 선택 메타를 파일로 저장한다.
+
+        Args:
+            document_id (str): 리포트 고유 문서 ID.
+            parsed_text (str): 파싱된 원문 텍스트.
+            diagnostics (PdfExtractionDiagnostics): 파서 선택 진단 정보.
+            directory (Path): 배치 응답 디렉터리.
+
+        Returns:
+            None: 파싱 로그 파일 저장만 수행한다.
+        """
+        parsed_dir: Path = directory / "_parsed"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+
+        text_path: Path = parsed_dir / f"{document_id}.txt"
+        meta_path: Path = parsed_dir / f"{document_id}.meta.json"
+        text_path.write_text(parsed_text, encoding="utf-8")
+        meta_path.write_text(
+            json.dumps(diagnostics.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _write_summary(self, summary: IngestionSummary, directory: Path) -> None:
         """
