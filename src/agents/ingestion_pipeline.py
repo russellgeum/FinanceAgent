@@ -7,17 +7,15 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
-
-from src.agents.gemini_summarizer import GeminiReportSummarizer
-from src.agents.summarizer import ClaudeReportSummarizer
+from src.agents.base_llm import BaseLLMEngine
+from src.agents.summarizer import ReportSummarizer
 from src.collectors.naver_report_collector import NaverReportCollector, ReportSource
 from src.processors.chunker import chunk_text
-from src.processors.embedder import VoyageEmbedder
+from src.processors.embedder import BaseEmbedder
 from src.processors.pdf_parser import extract_text_from_pdf
 from src.processors.schemas import ReportMetadata
 from src.storage.sqlite_store import CrawlHistoryStore
-from src.storage.vector_store import ChromaReportStore
+from src.storage.vector_store import BaseVectorStore
 from src.utils.datetime_utils import now_stamp
 
 
@@ -66,14 +64,15 @@ class NaverRAGIngestionPipeline:
     """
     네이버 리포트를 수집해 벡터 DB 적재와 통합 요약을 수행한다.
 
+    추상 인터페이스(BaseEmbedder, BaseVectorStore, BaseLLMEngine)를 통해
+    구체적인 구현체에 독립적으로 동작한다.
+
     Args:
         project_root (Path): 프로젝트 루트 경로.
-        voyage_api_key (str): Voyage API 키.
-        voyage_model (str): Voyage 임베딩 모델명.
-        anthropic_api_key (str): Anthropic API 키.
-        claude_model (str): Claude 모델명.
-        gemini_api_key (str): Gemini API 키.
-        gemini_model (str): Gemini 모델명.
+        embedder (BaseEmbedder): 임베딩 엔진 인스턴스.
+        vector_store (BaseVectorStore): 벡터 저장소 인스턴스.
+        claude_engine (BaseLLMEngine | None): Claude LLM 엔진 (없으면 None).
+        gemini_engine (BaseLLMEngine | None): Gemini LLM 엔진 (없으면 None).
         pages_per_category (int): 카테고리당 조회 페이지 수.
         max_reports (int): 최대 처리 리포트 수.
         use_playwright (bool): 크롤링 시 Playwright fallback 사용 여부.
@@ -86,44 +85,35 @@ class NaverRAGIngestionPipeline:
     def __init__(
         self,
         project_root: Path,
-        voyage_api_key: str,
-        voyage_model: str,
-        anthropic_api_key: str,
-        claude_model: str,
-        gemini_api_key: str,
-        gemini_model: str,
+        embedder: BaseEmbedder,
+        vector_store: BaseVectorStore,
+        claude_engine: BaseLLMEngine | None,
+        gemini_engine: BaseLLMEngine | None,
         pages_per_category: int,
         max_reports: int,
         use_playwright: bool,
         logger: logging.Logger,
     ) -> None:
         self._project_root: Path = project_root
-        self._voyage_api_key: str = voyage_api_key
-        self._voyage_model: str = voyage_model
-        self._anthropic_api_key: str = anthropic_api_key
-        self._claude_model: str = claude_model
-        self._gemini_api_key: str = gemini_api_key
-        self._gemini_model: str = gemini_model
+        self._embedder: BaseEmbedder = embedder
+        self._vector_store: BaseVectorStore = vector_store
         self._pages_per_category: int = pages_per_category
         self._max_reports: int = max_reports
         self._logger: logging.Logger = logger
 
         self._collector = NaverReportCollector(use_playwright=use_playwright)
-        self._embedder = VoyageEmbedder(
-            api_key=voyage_api_key,
-            model=voyage_model,
+
+        self._claude_summarizer: ReportSummarizer | None = (
+            ReportSummarizer(engine=claude_engine)
+            if claude_engine is not None
+            else None
         )
-        self._claude_summarizer = ClaudeReportSummarizer(
-            api_key=anthropic_api_key,
-            model=claude_model,
+        self._gemini_summarizer: ReportSummarizer | None = (
+            ReportSummarizer(engine=gemini_engine)
+            if gemini_engine is not None
+            else None
         )
-        self._gemini_summarizer = GeminiReportSummarizer(
-            api_key=gemini_api_key,
-            model=gemini_model,
-        )
-        self._vector_store = ChromaReportStore(
-            persist_directory=self._project_root / "data" / "chroma",
-        )
+
         self._history_store = CrawlHistoryStore(
             db_path=self._project_root / "data" / "system" / "crawl_history.db",
         )
@@ -138,11 +128,7 @@ class NaverRAGIngestionPipeline:
         Returns:
             IngestionSummary: 실행 요약 정보.
         """
-        if not self._voyage_api_key.strip():
-            raise ValueError(
-                "VOYAGE_API_KEY가 비어 있어 임베딩/벡터 적재를 진행할 수 없습니다.",
-            )
-        if not self._anthropic_api_key.strip() and not self._gemini_api_key.strip():
+        if self._claude_summarizer is None and self._gemini_summarizer is None:
             raise ValueError(
                 "ANTHROPIC_API_KEY 또는 GEMINI_API_KEY 중 하나는 필요합니다.",
             )
@@ -229,7 +215,7 @@ class NaverRAGIngestionPipeline:
                         },
                     )
 
-                self._vector_store.upsert(
+                self._vector_store.add_documents(
                     ids=chunk_ids,
                     documents=chunks,
                     embeddings=embeddings,
@@ -237,12 +223,12 @@ class NaverRAGIngestionPipeline:
                 )
                 claude_summary, claude_error = self._try_provider_summary(
                     provider_name="Claude",
-                    summarize_func=self._claude_summarizer.summarize,
+                    summarizer=self._claude_summarizer,
                     report_text=content,
                 )
                 gemini_summary, gemini_error = self._try_provider_summary(
                     provider_name="Gemini",
-                    summarize_func=self._gemini_summarizer.summarize,
+                    summarizer=self._gemini_summarizer,
                     report_text=content,
                 )
 
@@ -314,7 +300,7 @@ class NaverRAGIngestionPipeline:
     def _try_provider_summary(
         self,
         provider_name: str,
-        summarize_func: Callable[[str], str],
+        summarizer: ReportSummarizer | None,
         report_text: str,
     ) -> tuple[str | None, str | None]:
         """
@@ -322,15 +308,18 @@ class NaverRAGIngestionPipeline:
 
         Args:
             provider_name (str): 제공자 이름(Claude/Gemini).
-            summarize_func (Callable[[str], str]): 요약 함수.
+            summarizer (ReportSummarizer | None): 요약기 인스턴스(없으면 None).
             report_text (str): 요약 대상 원문 텍스트.
 
         Returns:
             tuple[str | None, str | None]:
                 성공 시 (요약문, None), 실패 시 (None, 에러 요약문).
         """
+        if summarizer is None:
+            return None, f"{provider_name} 엔진이 설정되지 않았습니다."
+
         try:
-            summary: str = summarize_func(report_text)
+            summary: str = summarizer.summarize(report_text)
             return summary, None
         except Exception as exc:
             error_message: str = self._format_error_message(exc)

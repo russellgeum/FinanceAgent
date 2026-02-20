@@ -1,26 +1,22 @@
-"""Voyage AI 임베딩 처리 모듈."""
+"""임베딩 추상 인터페이스 모듈."""
 
 from __future__ import annotations
 
-from typing import Any
+from abc import ABC, abstractmethod
 
 
-class VoyageEmbedder:
+class BaseEmbedder(ABC):
     """
-    Voyage AI API를 사용하는 텍스트 임베딩 도우미.
+    텍스트를 벡터로 변환하는 임베딩 추상 인터페이스.
 
     Args:
-        api_key (str): Voyage API 키.
-        model (str): 임베딩 모델명.
+        None
 
     Returns:
-        None: 임베딩 클라이언트 래퍼를 생성한다.
+        None: 추상 임베더 인터페이스를 정의한다.
     """
 
-    def __init__(self, api_key: str, model: str = "voyage-finance-2") -> None:
-        self._api_key: str = api_key
-        self._model: str = model
-
+    @abstractmethod
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """
         입력 텍스트 목록을 벡터로 변환한다.
@@ -31,16 +27,16 @@ class VoyageEmbedder:
         Returns:
             list[list[float]]: 각 텍스트에 대응하는 임베딩 벡터.
         """
-        if not self._api_key:
-            raise ValueError("VOYAGE_API_KEY가 설정되지 않았습니다.")
 
-        try:
-            import voyageai
-        except ImportError as exc:
-            raise RuntimeError(
-                "voyageai 패키지가 설치되지 않았습니다.",
-            ) from exc
 
-        client: Any = voyageai.Client(api_key=self._api_key)
-        result: Any = client.embed(texts=texts, model=self._model)
-        return [list(vector) for vector in result.embeddings]
+    @abstractmethod
+    def embed_query(self, text: str) -> list[float]:
+        """
+        단일 질의 텍스트를 벡터로 변환한다.
+
+        Args:
+            text (str): 임베딩할 질의 텍스트.
+
+        Returns:
+            list[float]: 질의에 대한 임베딩 벡터.
+        """

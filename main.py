@@ -7,7 +7,11 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
+from src.agents.base_llm import BaseLLMEngine
+from src.agents.inference_factory import create_llm_engine
 from src.agents.ingestion_pipeline import NaverRAGIngestionPipeline
+from src.processors.voyage_embedder import VoyageEmbedder
+from src.storage.chroma_vector_store import ChromaVectorStore
 from src.utils.config import AppConfig, load_app_config
 from src.utils.datetime_utils import now_stamp
 from src.utils.logging_utils import get_daily_logger
@@ -37,7 +41,7 @@ def bootstrap_directories(project_root: Path) -> None:
 
 def run_ingestion(project_root: Path, config: AppConfig) -> None:
     """
-    네이버 리포트 수집, RAG 적재, Claude 요약 파이프라인을 실행한다.
+    네이버 리포트 수집, RAG 적재, 통합 요약 파이프라인을 실행한다.
 
     Args:
         project_root (Path): 프로젝트 루트 경로.
@@ -52,10 +56,36 @@ def run_ingestion(project_root: Path, config: AppConfig) -> None:
         logger.info("시작 시 수집 파이프라인 실행이 비활성화되어 있습니다.")
         return
 
+    embedder = VoyageEmbedder(
+        api_key=config.voyage_api_key,
+        model=config.voyage_model,
+    )
+    vector_store = ChromaVectorStore(
+        persist_directory=project_root / "data" / "chroma",
+    )
+
+    claude_engine: BaseLLMEngine | None = None
+    if config.anthropic_api_key.strip():
+        claude_engine = create_llm_engine(
+            provider="claude",
+            api_key=config.anthropic_api_key,
+            model=config.claude_model,
+        )
+
+    gemini_engine: BaseLLMEngine | None = None
+    if config.gemini_api_key.strip():
+        gemini_engine = create_llm_engine(
+            provider="gemini",
+            api_key=config.gemini_api_key,
+            model=config.gemini_model,
+        )
+
     pipeline = NaverRAGIngestionPipeline(
         project_root=project_root,
-        voyage_api_key=config.voyage_api_key,
-        anthropic_api_key=config.anthropic_api_key,
+        embedder=embedder,
+        vector_store=vector_store,
+        claude_engine=claude_engine,
+        gemini_engine=gemini_engine,
         pages_per_category=config.naver_pages_per_category,
         max_reports=config.naver_max_reports,
         use_playwright=config.naver_use_playwright,
@@ -86,6 +116,7 @@ def run() -> None:
         run_ingestion(project_root=project_root, config=config)
     except Exception as exc:
         logger.exception("파이프라인 실행 실패: reason=%s", exc)
+        raise
 
 
 if __name__ == "__main__":

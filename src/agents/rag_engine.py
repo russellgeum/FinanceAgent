@@ -2,58 +2,44 @@
 
 from __future__ import annotations
 
-from typing import Any
+from src.processors.embedder import BaseEmbedder
+from src.storage.vector_store import BaseVectorStore
 
 
 class RAGEngine:
     """
-    ChromaDB 검색 결과를 기반으로 컨텍스트를 구성한다.
+    추상화된 Embedder와 VectorStore를 주입받아 검색-생성 흐름을 제어한다.
 
     Args:
-        persist_directory (str): ChromaDB 저장 경로.
-        collection_name (str): 검색할 컬렉션 이름.
+        embedder (BaseEmbedder): 임베딩 추상 인터페이스 구현체.
+        vector_store (BaseVectorStore): 벡터 저장소 추상 인터페이스 구현체.
 
     Returns:
         None: RAG 엔진 객체를 생성한다.
     """
 
-    def __init__(self, persist_directory: str, collection_name: str) -> None:
-        self._persist_directory: str = persist_directory
-        self._collection_name: str = collection_name
+    def __init__(
+        self,
+        embedder: BaseEmbedder,
+        vector_store: BaseVectorStore,
+    ) -> None:
+        self._embedder: BaseEmbedder = embedder
+        self._vector_store: BaseVectorStore = vector_store
 
-    def _get_collection(self) -> Any:
+
+    def search(self, query: str, top_k: int = 5) -> list[str]:
         """
-        ChromaDB 컬렉션 객체를 로드한다.
+        자연어 질의를 임베딩하여 유사 문서 청크를 검색한다.
 
         Args:
-            None
-
-        Returns:
-            Any: 검색 가능한 Chroma 컬렉션 객체.
-        """
-        try:
-            import chromadb
-        except ImportError as exc:
-            raise RuntimeError("chromadb 패키지가 설치되지 않았습니다.") from exc
-
-        client: Any = chromadb.PersistentClient(path=self._persist_directory)
-        return client.get_or_create_collection(self._collection_name)
-
-    def search(self, query_embedding: list[float], top_k: int = 5) -> list[str]:
-        """
-        질의 임베딩으로 상위 관련 청크를 조회한다.
-
-        Args:
-            query_embedding (list[float]): 질의 임베딩 벡터.
+            query (str): 자연어 검색 질의.
             top_k (int): 반환할 청크 수.
 
         Returns:
             list[str]: 관련 청크 텍스트 목록.
         """
-        collection: Any = self._get_collection()
-        result: Any = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
+        query_embedding: list[float] = self._embedder.embed_query(query)
+        return self._vector_store.similarity_search(
+            query_embedding=query_embedding,
+            top_k=top_k,
         )
-        documents: list[list[str]] = result.get("documents", [[]])
-        return documents[0] if documents else []
