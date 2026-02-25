@@ -56,6 +56,11 @@ def run_ingestion(project_root: Path, config: AppConfig) -> None:
         logger.info("시작 시 수집 파이프라인 실행이 비활성화되어 있습니다.")
         return
 
+    if not config.enable_vector_indexing:
+        logger.info(
+            "벡터 임베딩/저장 단계 비활성화: 다운로드->파싱->LLM 요약만 수행합니다.",
+        )
+
     embedder = VoyageEmbedder(
         api_key=config.voyage_api_key,
         model=config.voyage_model,
@@ -86,6 +91,7 @@ def run_ingestion(project_root: Path, config: AppConfig) -> None:
         vector_store=vector_store,
         claude_engine=claude_engine,
         gemini_engine=gemini_engine,
+        enable_vector_indexing=config.enable_vector_indexing,
         pages_per_category=config.naver_pages_per_category,
         max_reports=config.naver_max_reports,
         use_playwright=config.naver_use_playwright,

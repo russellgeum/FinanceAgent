@@ -16,9 +16,14 @@ class AppConfig(BaseModel):
     Args:
         profile (str): 실행 프로파일 이름.
         anthropic_api_key (str): Claude API 키.
+        claude_model (str): Claude 모델명.
+        gemini_api_key (str): Gemini API 키.
+        gemini_model (str): Gemini 모델명.
         voyage_api_key (str): Voyage API 키.
+        voyage_model (str): Voyage 임베딩 모델명.
         kis_app_key (str): KIS API 키.
         run_ingestion_on_start (bool): 시작 시 수집 파이프라인 실행 여부.
+        enable_vector_indexing (bool): 임베딩 및 벡터 저장 활성화 여부.
         naver_pages_per_category (int): 카테고리별 조회 페이지 수.
         naver_max_reports (int): 1회 실행 시 최대 처리 리포트 수.
         naver_use_playwright (bool): 정적 파싱 실패 시 Playwright fallback 사용 여부.
@@ -29,9 +34,14 @@ class AppConfig(BaseModel):
 
     profile: str = Field(default="dev")
     anthropic_api_key: str = Field(default="")
+    claude_model: str = Field(default="claude-sonnet-4-6")
+    gemini_api_key: str = Field(default="")
+    gemini_model: str = Field(default="gemini-2.0-flash")
     voyage_api_key: str = Field(default="")
+    voyage_model: str = Field(default="voyage-finance-2")
     kis_app_key: str = Field(default="")
     run_ingestion_on_start: bool = Field(default=True)
+    enable_vector_indexing: bool = Field(default=False)
     naver_pages_per_category: int = Field(default=1, ge=1)
     naver_max_reports: int = Field(default=10, ge=1)
     naver_use_playwright: bool = Field(default=False)
@@ -97,9 +107,14 @@ def load_app_config(project_root: Path) -> AppConfig:
     return AppConfig(
         profile=os.getenv("PBT_PROFILE", "dev"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        claude_model=os.getenv("PBT_CLAUDE_MODEL", "claude-sonnet-4-6"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+        gemini_model=os.getenv("PBT_GEMINI_MODEL", "gemini-2.0-flash"),
         voyage_api_key=os.getenv("VOYAGE_API_KEY", ""),
+        voyage_model=os.getenv("PBT_VOYAGE_MODEL", "voyage-finance-2"),
         kis_app_key=os.getenv("KIS_APP_KEY", ""),
         run_ingestion_on_start=_env_bool("PBT_RUN_INGESTION_ON_START", True),
+        enable_vector_indexing=_env_bool("PBT_ENABLE_VECTOR_INDEXING", False),
         naver_pages_per_category=_env_int("PBT_NAVER_PAGES_PER_CATEGORY", 1),
         naver_max_reports=_env_int("PBT_NAVER_MAX_REPORTS", 10),
         naver_use_playwright=_env_bool("PBT_NAVER_USE_PLAYWRIGHT", False),

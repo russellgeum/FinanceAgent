@@ -76,6 +76,7 @@ class NaverRAGIngestionPipeline:
         vector_store (BaseVectorStore): 벡터 저장소 인스턴스.
         claude_engine (BaseLLMEngine | None): Claude LLM 엔진 (없으면 None).
         gemini_engine (BaseLLMEngine | None): Gemini LLM 엔진 (없으면 None).
+        enable_vector_indexing (bool): 임베딩 및 벡터 저장 수행 여부.
         pages_per_category (int): 카테고리당 조회 페이지 수.
         max_reports (int): 최대 처리 리포트 수.
         use_playwright (bool): 크롤링 시 Playwright fallback 사용 여부.
@@ -92,6 +93,7 @@ class NaverRAGIngestionPipeline:
         vector_store: BaseVectorStore,
         claude_engine: BaseLLMEngine | None,
         gemini_engine: BaseLLMEngine | None,
+        enable_vector_indexing: bool,
         pages_per_category: int,
         max_reports: int,
         use_playwright: bool,
@@ -100,6 +102,7 @@ class NaverRAGIngestionPipeline:
         self._project_root: Path = project_root
         self._embedder: BaseEmbedder = embedder
         self._vector_store: BaseVectorStore = vector_store
+        self._enable_vector_indexing: bool = enable_vector_indexing
         self._pages_per_category: int = pages_per_category
         self._max_reports: int = max_reports
         self._logger: logging.Logger = logger
@@ -211,35 +214,41 @@ class NaverRAGIngestionPipeline:
                     parse_diagnostics.selected_text_length,
                     parse_diagnostics.selected_hangul_count,
                 )
-                chunks: list[str] = chunk_text(content)
-                if not chunks:
-                    raise RuntimeError("PDF 텍스트 청킹 결과가 비어 있습니다.")
+                if self._enable_vector_indexing:
+                    chunks: list[str] = chunk_text(content)
+                    if not chunks:
+                        raise RuntimeError("PDF 텍스트 청킹 결과가 비어 있습니다.")
 
-                embeddings: list[list[float]] = self._embedder.embed_texts(chunks)
-                chunk_ids: list[str] = [
-                    f"{document_id}_{index:04d}"
-                    for index in range(1, len(chunks) + 1)
-                ]
-                chunk_metadatas: list[dict[str, str]] = []
-                for index in range(1, len(chunks) + 1):
-                    chunk_metadatas.append(
-                        {
-                            "ticker": metadata.ticker,
-                            "date": metadata.date,
-                            "category": metadata.category,
-                            "url": metadata.url,
-                            "title": metadata.title,
-                            "document_id": document_id,
-                            "chunk_index": str(index),
-                        },
+                    embeddings: list[list[float]] = self._embedder.embed_texts(chunks)
+                    chunk_ids: list[str] = [
+                        f"{document_id}_{index:04d}"
+                        for index in range(1, len(chunks) + 1)
+                    ]
+                    chunk_metadatas: list[dict[str, str]] = []
+                    for index in range(1, len(chunks) + 1):
+                        chunk_metadatas.append(
+                            {
+                                "ticker": metadata.ticker,
+                                "date": metadata.date,
+                                "category": metadata.category,
+                                "url": metadata.url,
+                                "title": metadata.title,
+                                "document_id": document_id,
+                                "chunk_index": str(index),
+                            },
+                        )
+
+                    self._vector_store.add_documents(
+                        ids=chunk_ids,
+                        documents=chunks,
+                        embeddings=embeddings,
+                        metadatas=chunk_metadatas,
                     )
-
-                self._vector_store.add_documents(
-                    ids=chunk_ids,
-                    documents=chunks,
-                    embeddings=embeddings,
-                    metadatas=chunk_metadatas,
-                )
+                    chunk_count: int = len(chunks)
+                else:
+                    if not content.strip():
+                        raise RuntimeError("PDF 파싱 결과 텍스트가 비어 있습니다.")
+                    chunk_count = 0
                 claude_summary, claude_error = self._try_provider_summary(
                     provider_name="Claude",
                     summarizer=self._claude_summarizer,
@@ -288,10 +297,11 @@ class NaverRAGIngestionPipeline:
                 )
                 processed_count += 1
                 self._logger.info(
-                    "적재/통합요약 성공: id=%s, title=%s, chunks=%s",
+                    "처리/통합요약 성공: id=%s, title=%s, chunks=%s, vector_indexing=%s",
                     document_id,
                     source.title,
-                    len(chunks),
+                    chunk_count,
+                    self._enable_vector_indexing,
                 )
             except Exception as exc:
                 skipped_error_count += 1
